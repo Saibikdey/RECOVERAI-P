@@ -29,7 +29,8 @@ flowchart TD
         IDEMP["Idempotency Engine (Duplicate Request Protection)"]
         ORCH["Recovery Orchestrator"]
         RISK["Risk Engine (Feasibility & Value)"]
-        
+        CANDIDATES["Candidate Actions"]
+
         subgraph AI_Advisory ["AI Advisory Sub-System"]
             LLM["LLM Diagnostic Service\n(Root-Cause, Confidence, Recommendation)\n[ADVISORY ONLY]"]
         end
@@ -38,7 +39,8 @@ flowchart TD
             PE["POLICY ENGINE (THE FINAL & SOLE AUTHORITY)\n• Action Whitelist Enforcement\n• Max Retries Limit (Attempts >= 3)\n• Confidence Guard (< 0.65)\n• Fraud Zero-Tolerance Protection\n• Expired Card Auto-Routing\n• High-Value & VIP Account Escalation"]
         end
 
-        SIM["Simulation & Analytics Engine\n(Synthetic Outcome Determination for 3 Strategies)"]
+        ECON["Economic Evaluation"]
+        SIM["Recovery Simulation\n(Synthetic Outcome Determination for 3 Strategies)"]
     end
 
     subgraph Storage_Layer ["SQLite Storage Layer"]
@@ -53,8 +55,10 @@ flowchart TD
     IDEMP --> DB_Events
     ORCH --> RISK
     ORCH --> LLM
-    LLM -->|Advisory Recommendation| PE
-    PE ==>|Approved & Validated Action| SIM
+    LLM -->|AI Recommendation| CANDIDATES
+    CANDIDATES --> PE
+    PE ==>|Approved & Validated Action| ECON
+    ECON --> SIM
     SIM --> ORCH
     ORCH ==> DB_Payments
     ORCH ==> DB_Audit
@@ -64,13 +68,19 @@ flowchart TD
 
 ## 2. Zero-Trust Authority Flow
 
+The controlling pipeline is:
+
+**Payment Event → Idempotency → AI Diagnosis → Candidate Actions → Deterministic Policy Engine → Economic Evaluation → Recovery Simulation → Audit Trail**
+
+> **AI RECOMMENDS. POLICY ENGINE DECIDES. ECONOMICS WEIGHS.**
+
 ```
 LLM Diagnostic Service              Deterministic Policy Engine               Outcome / Execution
    (ADVISORY ONLY)                     (FINAL AUTHORITY)                       (SIMULATION ONLY)
 
 ┌───────────────────────┐            ┌───────────────────────┐            ┌───────────────────────┐
 │ • Root-Cause Analysis │            │ • Whitelist Validation│            │ • Simulated Recovery  │
-│ • Confidence Score    │ ─────────> │ • Safety Guardrails   │ ─────────> │ • Net Revenue Calculation │
+│ • Confidence Score    │ ─────────> │ • Safety Guardrails   │ ─────────> │ • Revenue Calculation │
 │ • Recommended Action  │            │ • Explicit Overrides  │            │ • Immutable Audit Log │
 └───────────────────────┘            └───────────────────────┘            └───────────────────────┘
   *Zero financial state                *Sole authorization                   *Synthetic outcomes
@@ -98,27 +108,37 @@ LLM Diagnostic Service              Deterministic Policy Engine               Ou
 
 ## 4. 3-Way Comparative Evaluation Framework
 
-To objectively quantify recovery performance and economic viability, RecoverAI implements a comprehensive 3-way evaluation framework:
+All figures below come from controlled synthetic simulations using documented probability assumptions. This evaluation does **not** claim real-world statistical significance or live gateway performance.
 
-> [!NOTE]
-> **Synthetic Domain Assumptions Disclaimer**: All strategies are evaluated against a documented synthetic outcome model ([`simulator.py`](backend/app/services/simulator.py)). Outcomes, probabilities, and financial figures reflect controlled simulation performance, **not empirical live gateway data or real-world statistical significance**. The 20-seed robustness evaluation tests whether the comparative advantage holds across 20 distinct pseudo-random transaction mixes (2,000 transactions).
+To evaluate the value of AI, RecoverAI implements a 3-way evaluation framework:
 
 1. **Baseline 1: Naive Blind Retry**:
-   - **Strategy**: Blind immediate 3x retries on all payment failures without root-cause diagnosis or safety filters.
-   - **20-Seed Performance**: Mean Gross ₹7.05L | Mean Cost ₹5,387 | **Mean Net ₹7.00L** | Mean Rev Rate 18.90% | **Mean Tx Rate 20.75%** (±4.58%).
-   - **Outcome**: Low recovery, heavy customer fatigue (228 wasted failures in Seed 42), and wasted intervention costs.
-
+   - Strategy: Blind immediate 3x retries on all failures without root-cause diagnosis.
+    - Evaluation: Seed-42 batch net recovered ₹998,501.09, with 27.61% revenue recovery and 24.0% transaction recovery.
 2. **Baseline 2: Simple Rule-Based Recovery**:
-   - **Strategy**: Static deterministic mapping of error codes to recovery channels without customer tier, value, or channel context.
-   - **20-Seed Performance**: Mean Gross ₹18.48L | Mean Cost ₹1,202 | **Mean Net ₹18.47L** | Mean Rev Rate 49.91% | **Mean Tx Rate 63.05%** (±4.37%).
-   - **Outcome**: Improved over blind retries, but incapable of nuanced multi-variable reasoning for VIP accounts or ambiguous declines.
-
+   - Strategy: Static deterministic mapping of error codes to recovery channels.
+    - Evaluation: Seed-42 batch net recovered ₹2,038,402.48, with 56.09% revenue recovery and 65.0% transaction recovery.
 3. **RecoverAI (AI Contextual Diagnosis + Deterministic Policy Engine)**:
-   - **Strategy**: LLM contextual root-cause reasoning combined with strict deterministic policy guardrails and economic optimization.
-   - **20-Seed Performance**: Mean Gross ₹25.53L | Mean Cost ₹2,111 | **Mean Net ₹25.51L** (±₹2.62L) | Mean Rev Rate 68.62% | **Mean Tx Rate 82.15%** (±4.22%, range 74.0% – 89.0%).
-   - **Comparative Advantage**:
-     - **vs Simple Rule**: **+₹703,461.20 (+38.08% net revenue uplift)**, **+19.10 percentage points** transaction recovery advantage.
-     - **vs Blind Retry**: **+₹1,851,006.58 (+264.55% net revenue uplift)**, **+61.40 percentage points** transaction recovery advantage.
+   - Strategy: LLM contextual root-cause reasoning combined with strict deterministic policy guardrails.
+    - Evaluation: Seed-42 batch net recovered ₹2,671,622.71, with 73.54% revenue recovery and 84.0% transaction recovery.
+
+### Seed 42 Results
+
+| Metric | RecoverAI | Simple Rule | Blind Retry |
+|---|---:|---:|---:|
+| Gross recovered | ₹2,674,177.71 | ₹2,039,557.48 | ₹1,003,861.09 |
+| Intervention cost | ₹2,555.00 | ₹1,155.00 | ₹5,360.00 |
+| Net recovered | ₹2,671,622.71 | ₹2,038,402.48 | ₹998,501.09 |
+| Revenue recovery | 73.54% | 56.09% | 27.61% |
+| Transaction recovery | 84/100 = 84.0% | 65.0% | 24.0% |
+
+RecoverAI recorded 32 retries, 0 wasted/failed retries, 15 policy overrides, and 5 fraud blocks with 100% blocked.
+
+### 20-Seed Robustness Evaluation
+
+The robustness run covers 2,000 synthetic transactions. RecoverAI results were mean gross ₹2,552,810.19, mean intervention cost ₹2,110.50, mean net ₹2,550,699.69, mean revenue recovery 68.62%, and mean transaction recovery 82.15%. The recovery range was 74.0%–89.0%, with a median of 82.0% and standard deviation of ±4.22%.
+
+Mean net was ₹1,847,238.48 for Simple Rule and ₹699,693.11 for Blind Retry. RecoverAI's net uplift was +₹703,461.20 (+38.08%) versus Rule and +₹1,851,006.58 (+264.55%) versus Blind. Transaction advantage was +19.10 percentage points versus Rule and +61.40 percentage points versus Blind.
 
 ---
 
@@ -138,7 +158,7 @@ recoverai/
 │   │   │   ├── risk_engine.py     # Revenue at risk & feasibility assessment
 │   │   │   ├── llm_service.py     # LLM diagnostic service + deterministic fallback
 │   │   │   ├── policy_engine.py   # FINAL AUTHORITY deterministic guardrails
-│   │   │   ├── simulator.py       # 3-way strategy simulation engine & cost model
+│   │   │   ├── simulator.py       # 3-way strategy simulation engine
 │   │   │   └── orchestrator.py    # Pipeline coordinator & multi-seed evaluation
 │   │   └── routers/
 │   │       ├── payments.py        # /api/payments endpoints (with idempotency reset)

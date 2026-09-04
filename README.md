@@ -32,6 +32,8 @@ Failed digital payments are not all the same. Traditional payment recovery relie
 ## 💡 Why AI + Rules?
 
 > **"AI performs contextual root-cause diagnosis and recommends an action; deterministic rules validate and authorize the action."**
+>
+> **AI RECOMMENDS. POLICY ENGINE DECIDES. ECONOMICS WEIGHS.**
 
 - **Why AI?** Digital payment failures are multifaceted. The same error code (`DO_NOT_HONOR` or `LIMIT_EXCEEDED`) requires different handling depending on customer tier (VIP vs Standard), prior retry count, and transaction amount. AI provides contextual reasoning that static lookup tables cannot provide.
 - **Why Deterministic Rules?** Financial systems require zero-trust safety. An LLM must **never** have autonomous authority to debit accounts or modify financial ledgers. The deterministic Policy Engine acts as the sole, unalterable final authority.
@@ -103,44 +105,47 @@ Payment Failure Event
 
 ## 📊 3-Way Strategy Comparison (100-Record Seed 42 Batch)
 
-| Metric | RecoverAI (AI + Policy Engine) | Baseline 2 (Simple Rule-Based) | Baseline 1 (Naive Blind Retries) | Net AI Advantage vs Rule | Net AI Advantage vs Blind |
-|---|---|---|---|---|---|
-| **Total Revenue at Risk** | ₹3,636,475.84 | ₹3,636,475.84 | ₹3,636,475.84 | — | — |
-| **Gross Recovered Revenue** | **₹2,674,177.71** | ₹2,039,557.48 | ₹1,003,861.09 | **+₹634,620.23** | **+₹1,670,316.62** |
-| **Intervention Cost** | **₹2,555.00** | ₹1,155.00 | ₹5,360.00 | +₹1,400.00 | **-₹2,805.00 (Saved)** |
-| **Net Recovered Revenue** | **₹2,671,622.71** | ₹2,038,402.48 | ₹998,501.09 | **+₹633,220.23 (+31.06%)** | **+₹1,673,121.62 (+167.56%)** |
-| **Revenue Recovery Rate** | **73.54%** | 56.09% | 27.61% | **+17.45 percentage points** | **+45.93 percentage points** |
-| **Transaction Recovery Rate** | **84.0%** (84 / 100) | 65.0% (65 / 100) | 24.0% (24 / 100) | **+19.0 percentage points** | **+60.0 percentage points** |
-| **Retries Executed** | **32** (Targeted only) | 37 (Static) | 268 (Blind) | 5 retries saved | **236 retries saved** |
-| **Wasted / Failed Retries** | **0** | 9 | 228 repeated failures | 9 fatigue events prevented | **228 fatigue events prevented** |
-| **Policy Guardrail Overrides** | **15** safety interventions | 0 (No safety engine) | 0 (Blind) | Safe authorization enforced | Strict governance active |
-| **Fraud Interventions** | **5** (100% blocked) | 5 (Blocked) | 0 (Exposed to chargebacks) | Zero fraud loss incurred | Zero fraud loss incurred |
+| Metric | RecoverAI (AI + Policy) | Simple Rule | Blind Retry |
+|---|---|---|---|
+| **Total Revenue at Risk** | ₹3,636,475.84 | ₹3,636,475.84 | ₹3,636,475.84 |
+| **Gross recovered** | **₹2,674,177.71** | ₹2,039,557.48 | ₹1,003,861.09 |
+| **Intervention cost** | **₹2,555.00** | ₹1,155.00 | ₹5,360.00 |
+| **Net recovered** | **₹2,671,622.71** | ₹2,038,402.48 | ₹998,501.09 |
+| **Revenue recovery** | **73.54%** | 56.09% | 27.61% |
+| **Transaction recovery** | **84.0%** (84 / 100) | 65.0% | 24.0% |
+| **Retries** | **32** | — | — |
+| **Wasted / failed retries** | **0** | — | — |
+| **Policy overrides** | **15** | — | — |
+| **Fraud blocks** | **5** (100% blocked) | — | — |
 
 ---
 
-## 🔬 Multi-Seed Robustness Evaluation (20 Seeds, 2,000 Transactions)
+## 🔬 20-Seed Robustness Evaluation (20 Seeds, 2,000 Transactions)
 
-> [!NOTE]
-> **What this evaluation shows, and what it doesn't:** All three strategies are scored against a hand-authored synthetic probability model ([`simulator.py`](backend/app/services/simulator.py)), not real payment gateway outcomes. Under those documented assumptions, contextual action selection outperforms static rules and blind retries **by construction** — that is the design concept the demo illustrates. What the 20-seed evaluation adds is *robustness*: it proves the strategy gap remains consistent across 20 distinct pseudo-random transaction mixes, rather than being an artifact of the seed-42 demo batch. It is **not** a claim of real-world statistical significance or live gateway production performance.
+> **What this evaluation shows, and what it doesn't:** This evaluation uses controlled synthetic simulations and documented probability assumptions in [`simulator.py`](backend/app/services/simulator.py). It does **not** claim real-world statistical significance or live gateway performance. The 20-seed run measures robustness across different synthetic transaction mixes, not empirical production outcomes.
 
-To verify that the strategy advantage is consistent across varied failure profiles, RecoverAI includes an automated 20-seed robustness evaluation across 2,000 distinct transactions:
+To check that the strategy gap is not an artifact of the specific seed-42 transaction mix, RecoverAI includes a robustness evaluation across 20 distinct pseudo-random datasets:
 
 ```bash
-PYTHONPATH=backend python3 backend/scripts/evaluate_seeds.py
+python3 backend/scripts/evaluate_seeds.py
 ```
 
-### 20-Seed Aggregate Summary
+### 20-Seed Aggregate Results
 
-| Metric | RecoverAI (AI + Policy Engine) | Simple Rule-Based Baseline | Naive Blind Retry Baseline |
+| Metric | RecoverAI (AI + Policy) | Simple Rule Baseline | Blind Retry Baseline |
 |---|---|---|---|
-| **Mean Gross Revenue Recovered** | **₹2,552,810.19** | ₹1,848,440.23 | ₹705,080.11 |
-| **Mean Intervention Cost** | **₹2,110.50** | ₹1,201.75 | ₹5,387.00 |
-| **Mean Net Revenue Recovered** | **₹2,550,699.69** (StdDev: ±₹262,215.88) | ₹1,847,238.48 | ₹699,693.11 |
-| **Mean Revenue Recovery Rate** | **68.62%** | 49.91% | 18.90% |
-| **Mean Transaction Recovery Rate** | **82.15%** (StdDev: ±4.22%, Median: 82.0%) | 63.05% (StdDev: ±4.37%) | 20.75% (StdDev: ±4.58%) |
-| **Transaction Recovery Range** | **74.0% – 89.0%** | 57.0% – 70.0% | 11.0% – 29.0% |
-| **Mean Net Revenue Uplift vs Baseline** | — | **+₹703,461.20 (+38.08%)** | **+₹1,851,006.58 (+264.55%)** |
-| **Transaction Recovery Advantage** | — | **+19.10 percentage points** | **+61.40 percentage points** |
+| **Mean gross recovered** | **₹2,552,810.19** | — | — |
+| **Mean intervention cost** | **₹2,110.50** | — | — |
+| **Mean net recovered** | **₹2,550,699.69** | **₹1,847,238.48** | **₹699,693.11** |
+| **Mean revenue recovery** | **68.62%** | — | — |
+| **Mean transaction recovery** | **82.15%** | — | — |
+| **Recovery rate range** | **74.0%–89.0%** | — | — |
+| **Median recovery rate** | **82.0%** | — | — |
+| **Standard deviation** | **±4.22%** | — | — |
+| **Net uplift vs Rule** | **+₹703,461.20 (+38.08%)** | — | — |
+| **Net uplift vs Blind** | **+₹1,851,006.58 (+264.55%)** | — | — |
+| **Transaction advantage vs Rule** | **+19.10 percentage points** | — | — |
+| **Transaction advantage vs Blind** | **+61.40 percentage points** | — | — |
 
 ---
 
@@ -170,10 +175,10 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 # Run full automated test suite (15 / 15 tests pass)
-PYTHONPATH=. pytest tests/test_core.py -v
+pytest tests/test_core.py -v
 
 # Run 20-seed robustness evaluation
-PYTHONPATH=. python3 scripts/evaluate_seeds.py
+python3 scripts/evaluate_seeds.py
 
 # Start FastAPI backend server (http://127.0.0.1:8000)
 uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
@@ -223,8 +228,8 @@ The dashboard header displays a live badge indicating whether the current run us
    - Click **"1. Blind Retry"** to simulate blind 3x retries.
    - Click **"2. Rule Baseline"** to simulate static rule-based recovery.
    - Click **"3. Run RecoverAI"** to execute AI diagnosis with policy engine authorization.
-4. **Compare 3 Strategies**: Observe the side-by-side 3-card comparison showing RecoverAI's +₹6.33L net revenue uplift over simple rules (+31.06% net uplift, +19.0 percentage points tx recovery) and +₹16.73L net revenue uplift over blind retries.
-5. **View 20-Seed Analysis**: Expand the **"Multi-Seed Robustness Evaluation"** drawer to view consistency across 2,000 simulated transactions under the documented synthetic probability model.
+4. **Compare 3 Strategies**: Observe the side-by-side comparison of gross recovery, intervention cost, net recovery, and recovery rates.
+5. **View 20-Seed Analysis**: Expand the **"20-Seed Robustness Evaluation"** drawer to view consistency across 2,000 simulated transactions under the documented synthetic probability model.
 6. **Inspect Single Payment & Idempotency**:
    - Navigate to the **"Transactions"** tab and click **"Diagnose"** on any transaction to view the 4-stage pipeline stepper (**"AI RECOMMENDS. POLICY ENGINE DECIDES."**).
 7. **Inspect Audit Trail**: Switch to the **"Audit Trail"** tab to filter by **"Overrides Only"** or **"Duplicates Blocked"**.
@@ -236,21 +241,21 @@ The dashboard header displays a live badge indicating whether the current run us
 
 Run the full pytest suite:
 ```bash
-PYTHONPATH=backend pytest backend/tests/test_core.py -v
+pytest backend/tests/test_core.py -v
 ```
 **Tests Covered (15 / 15 Passing)**:
-- `test_synthetic_payment_generation`: Synthetic dataset generation (100 records)
-- `test_revenue_at_risk_calculation`: Revenue at risk & feasibility assessment
-- `test_llm_diagnosis_schema_and_fallback`: LLM structured JSON output schema & fallback
-- `test_policy_engine_max_retries_guard`: Policy engine max retries guard (Attempts $\ge 3$)
-- `test_policy_engine_fraud_protection`: Fraud zero-tolerance guard
-- `test_policy_engine_expired_card_no_retry`: Expired card auto-routing guard
-- `test_policy_engine_confidence_threshold_guard`: Confidence threshold guard ($< 0.65$)
-- `test_policy_engine_high_value_vip_guard`: High-value & VIP account guard
-- `test_reproducibility_stable_seed_across_calls`: Reproducibility & stable seed (SHA-256)
-- `test_economic_evaluation_expected_net_recovery`: Economic evaluation & expected net revenue optimization
-- `test_idempotency_atomic_and_duplicate_blocked`: Atomic idempotency & duplicate event protection
-- `test_baseline_independence`: Baseline independence & isolated execution
-- `test_3_way_strategy_comparison_with_net_metrics`: 3-way comparative analytics with gross/cost/net metrics
-- `test_multi_seed_robustness_evaluation`: Multi-seed robustness evaluation across pseudo-random datasets
-- `test_api_endpoints_including_seed_reset`: FastAPI REST endpoints integration & custom seed reset
+- Synthetic dataset generation (100 records)
+- Revenue at risk calculation
+- LLM structured JSON output schema & fallback
+- Deterministic policy engine max retries guard
+- Fraud zero-tolerance guard
+- Expired card guard
+- Confidence threshold guard
+- High-value / VIP account guard
+- Authority boundary invariance
+- **Idempotency: first event execution success & duplicate blocked**
+- **Idempotency: distinct events execute independently**
+- **Baseline 2: Rule-Based recovery simulation**
+- **3-Way Strategy comparative analytics**
+- **Multi-seed robustness evaluation runner**
+- FastAPI REST endpoints integration

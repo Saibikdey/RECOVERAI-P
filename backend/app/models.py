@@ -25,25 +25,31 @@ class PaymentRecord(Base):
     risk_score = Column(Float, default=0.5) # 0.0 to 1.0
     risk_level = Column(String(32), default="MEDIUM") # LOW, MEDIUM, HIGH, CRITICAL
     
-    # 1. AI Recovery Results (RecoverAI)
+    # 1. RecoverAI Execution Results
     recovery_action_taken = Column(String(32), nullable=True) # RETRY, ALTERNATE_PAYMENT, REMINDER, ESCALATE, NO_ACTION
-    recovered_amount = Column(Float, default=0.0)
+    recovered_amount = Column(Float, default=0.0)             # Gross recovered
+    intervention_cost = Column(Float, default=0.0)            # Synthetic cost incurred
+    net_recovered_amount = Column(Float, default=0.0)         # Net = Gross - Cost
     
     # 2. Baseline 1: Naive Blind 3x Retry Simulation Results
     baseline_status = Column(String(32), nullable=True) # RECOVERED, PERMANENTLY_FAILED
     baseline_retries = Column(Integer, default=0)
     baseline_recovered_amount = Column(Float, default=0.0)
+    baseline_intervention_cost = Column(Float, default=0.0)
+    baseline_net_recovered_amount = Column(Float, default=0.0)
 
     # 3. Baseline 2: Simple Rule-Based Recovery Simulation Results
     rule_baseline_status = Column(String(32), nullable=True) # RECOVERED, FAILED
     rule_baseline_action = Column(String(32), nullable=True) # RETRY, ALTERNATE_PAYMENT, REMINDER, ESCALATE, NO_ACTION
     rule_baseline_retries = Column(Integer, default=0)
     rule_baseline_recovered_amount = Column(Float, default=0.0)
+    rule_baseline_intervention_cost = Column(Float, default=0.0)
+    rule_baseline_net_recovered_amount = Column(Float, default=0.0)
 
 
 class ProcessedEvent(Base):
     """
-    Idempotency store to track processed payment/recovery event IDs and prevent duplicate executions.
+    Idempotency store to track processed payment/recovery event IDs with unique constraints.
     """
     __tablename__ = "processed_events"
 
@@ -54,6 +60,8 @@ class ProcessedEvent(Base):
     action_approved = Column(String(32), nullable=False)
     simulation_status = Column(String(32), nullable=False)
     recovered_amount = Column(Float, default=0.0)
+    intervention_cost = Column(Float, default=0.0)
+    net_recovered_amount = Column(Float, default=0.0)
     response_json = Column(Text, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
@@ -66,7 +74,7 @@ class AuditLog(Base):
     transaction_id = Column(String(64), nullable=False, index=True)
     event_id = Column(String(64), nullable=True, index=True)
     
-    llm_mode = Column(String(32), nullable=False) # "LLM Mode" or "Deterministic Fallback Mode"
+    llm_mode = Column(String(64), nullable=False) # "LLM Mode (Provider)" or "Deterministic Fallback Mode"
     llm_diagnosis = Column(Text, nullable=False)
     llm_confidence = Column(Float, nullable=False)
     llm_action_recommended = Column(String(32), nullable=False)
@@ -77,7 +85,9 @@ class AuditLog(Base):
     
     simulation_status = Column(String(32), nullable=False) # RECOVERED, FAILED, ESCALATED, BLOCKED, DUPLICATE_BLOCKED
     simulated_probability = Column(Float, default=0.0)
-    recovered_amount = Column(Float, default=0.0)
+    recovered_amount = Column(Float, default=0.0)          # Gross recovered
+    intervention_cost = Column(Float, default=0.0)         # Synthetic action cost
+    net_recovered_amount = Column(Float, default=0.0)      # Net = Gross - Cost
     
     duplicate_blocked = Column(Boolean, default=False)
     timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)

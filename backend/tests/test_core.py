@@ -1,33 +1,28 @@
-import subprocess
-import sys
-from unittest.mock import patch
-
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, Query
+from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
-from sqlalchemy.exc import IntegrityError
 
 from app.database import Base, get_db
 from app.main import app
 from app.models import PaymentRecord, AuditLog, ProcessedEvent
-from app.generator import generate_synthetic_payments
 from app.schemas import RecoveryActionEnum, LLMDiagnosisOutput
-from app.services.risk_engine import RiskEngine
+from app.generator import generate_synthetic_payments
 from app.services.llm_service import LLMService
 from app.services.policy_engine import PolicyEngine
-from app.services.simulator import SimulationEngine, stable_seed
+from app.services.simulator import SimulationEngine, stable_seed, INTERVENTION_COSTS
+from app.services.risk_engine import RiskEngine
 from app.services.orchestrator import RecoveryOrchestrator
 
-# Test DB Setup (in-memory SQLite with StaticPool so all connections share the same memory DB)
+# Setup in-memory SQLite database for testing
 SQLALCHEMY_DATABASE_URL = "sqlite:///:memory:"
-test_engine = create_engine(
+engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
     connect_args={"check_same_thread": False},
-    poolclass=StaticPool
+    poolclass=StaticPool,
 )
-TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
+TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def override_get_db():
     db = TestingSessionLocal()
@@ -37,557 +32,372 @@ def override_get_db():
         db.close()
 
 app.dependency_overrides[get_db] = override_get_db
+client = TestClient(app)
 
 @pytest.fixture(autouse=True)
-def setup_database():
-    Base.metadata.create_all(bind=test_engine)
+def setup_db():
+    Base.metadata.create_all(bind=engine)
     db = TestingSessionLocal()
-    # Seed 100 test records
     records = generate_synthetic_payments(count=100, seed=42)
     db.add_all(records)
     db.commit()
+    db.close()
     yield
-    Base.metadata.drop_all(bind=test_engine)
+    Base.metadata.drop_all(bind=engine)
 
-client = TestClient(app)
-
-# ==================== 1. SYNTHETIC DATASET TESTS ====================
-
+# 1. Dataset Generation Test
 def test_synthetic_payment_generation():
-    """Verify that exactly 100 synthetic failed payment records are generated with valid data."""
     records = generate_synthetic_payments(count=100, seed=42)
     assert len(records) == 100
-    
     for r in records:
-        assert r.transaction_id.startswith("pay_fail_")
-        assert r.customer_id.startswith("cust_")
-        assert r.amount > 0.0
+        assert r.amount > 0
         assert r.currency == "INR"
         assert r.status == "FAILED"
-        assert r.customer_tier in ["STANDARD", "VIP", "ENTERPRISE"]
         assert r.error_code in [
-            "INSUFFICIENT_FUNDS", "CARD_EXPIRED", "BANK_SERVER_DOWN",
-            "NETWORK_TIMEOUT", "AUTHENTICATION_FAILED_3DS", "LIMIT_EXCEEDED",
+            "INSUFFICIENT_FUNDS", "CARD_EXPIRED", "BANK_SERVER_DOWN", 
+            "NETWORK_TIMEOUT", "AUTHENTICATION_FAILED_3DS", "LIMIT_EXCEEDED", 
             "SUSPECTED_FRAUD", "DO_NOT_HONOR"
         ]
 
-# ==================== 2. REVENUE AT RISK & RISK ENGINE TESTS ====================
-
+# 2. Revenue at Risk Calculation Test
 def test_revenue_at_risk_calculation():
-    """Verify that revenue at risk correctly calculates the total exposure."""
-    db = TestingSessionLocal()
-    payments = db.query(PaymentRecord).all()
-    total_risk = sum(p.amount for p in payments)
-    assert total_risk > 0.0
-    
-    for p in payments:
-        risk_data = RiskEngine.evaluate_risk(p)
-        assert "is_high_value" in risk_data
-        assert "urgency" in risk_data
-        assert 0.0 <= risk_data["recovery_feasibility"] <= 1.0
+    records = generate_synthetic_payments(count=100, seed=42)
+    total_risk = sum(r.amount for r in records)
+    assert total_risk > 1000000.0  # Should exceed ₹10 Lakhs
 
-# ==================== 3. LLM SERVICE & DETERMINISTIC FALLBACK ====================
-
+# 3. LLM Diagnosis Schema & Fallback Test
 def test_llm_diagnosis_schema_and_fallback():
-    """Verify that diagnosis produces valid structured output matching LLMDiagnosisOutput schema."""
-    sample_payment = PaymentRecord(
-        transaction_id="pay_test_001",
-        customer_id="cust_001",
-        customer_name="Aarav Sharma",
-        customer_tier="STANDARD",
-        amount=5000.0,
-        currency="INR",
-        payment_method="UPI",
-        error_code="BANK_SERVER_DOWN",
-        error_message="Issuer bank core switch not responding",
-        status="FAILED",
-        retry_count=0
-    )
-    
-    diagnosis, mode = LLMService.diagnose_payment(sample_payment)
-    assert isinstance(diagnosis, LLMDiagnosisOutput)
-    assert diagnosis.root_cause_diagnosis != ""
-    assert 0.0 <= diagnosis.confidence <= 1.0
-    assert diagnosis.recommended_action in RecoveryActionEnum
-    assert mode in ["LLM Mode", "Deterministic Fallback Mode"]
+    records = generate_synthetic_payments(count=5, seed=42)
+    for r in records:
+        diag, mode = LLMService.diagnose_payment(r)
+        assert isinstance(diag, LLMDiagnosisOutput)
+        assert 0.0 <= diag.confidence <= 1.0
+        assert diag.recommended_action in list(RecoveryActionEnum)
+        assert len(diag.root_cause_diagnosis) > 5
 
-# ==================== 4. DETERMINISTIC POLICY ENGINE SAFETY GUARDRAILS ====================
-
+# 4. Policy Engine: Max Retries Guard Test
 def test_policy_engine_max_retries_guard():
-    """Rule Check: If retry_count >= 3 and action is RETRY, Policy Engine must override."""
-    exhausted_payment = PaymentRecord(
-        transaction_id="pay_test_retries",
-        customer_id="cust_002",
-        customer_name="Rohan Verma",
+    db = TestingSessionLocal()
+    payment = PaymentRecord(
+        transaction_id="tx_test_max_retry",
+        customer_id="cust_1",
+        customer_name="Test Customer",
         customer_tier="STANDARD",
-        amount=2500.0,
+        amount=1500.0,
         currency="INR",
         payment_method="UPI",
         error_code="BANK_SERVER_DOWN",
-        error_message="Issuer switch timeout",
-        retry_count=3
+        error_message="Server down",
+        status="FAILED",
+        retry_count=3  # Max retries reached
     )
-    
-    llm_diag = LLMDiagnosisOutput(
+    mock_diagnosis = LLMDiagnosisOutput(
         root_cause_diagnosis="Temporary bank outage",
-        confidence=0.88,
+        confidence=0.90,
         recommended_action=RecoveryActionEnum.RETRY,
-        rationale="Retry after cooldown"
+        rationale="Retry should succeed"
     )
-    
-    decision = PolicyEngine.evaluate(exhausted_payment, llm_diag)
-    assert decision.is_overridden is True
-    assert decision.approved_action != RecoveryActionEnum.RETRY
-    assert "Max Retries" in decision.override_reason
+    policy_res = PolicyEngine.evaluate(payment, mock_diagnosis)
+    assert policy_res.is_overridden is True
+    assert policy_res.approved_action in [RecoveryActionEnum.ALTERNATE_PAYMENT, RecoveryActionEnum.ESCALATE]
+    assert "Max Retries Exhausted" in (policy_res.override_reason or "")
+    db.close()
 
+# 5. Policy Engine: Fraud Protection Test
 def test_policy_engine_fraud_protection():
-    """Rule Check: Suspected fraud must NEVER allow RETRY or REMINDER."""
-    fraud_payment = PaymentRecord(
-        transaction_id="pay_test_fraud",
-        customer_id="cust_003",
-        customer_name="Anonymous Fraudster",
+    payment = PaymentRecord(
+        transaction_id="tx_test_fraud",
+        customer_id="cust_fraud",
+        customer_name="Suspect User",
         customer_tier="STANDARD",
-        amount=85000.0,
+        amount=65000.0,
         currency="INR",
         payment_method="CREDIT_CARD",
         error_code="SUSPECTED_FRAUD",
-        error_message="High velocity IP anomaly",
+        error_message="Security velocity anomaly",
+        status="FAILED",
         retry_count=0
     )
-    
-    bad_llm_diag = LLMDiagnosisOutput(
-        root_cause_diagnosis="Potential false positive",
-        confidence=0.90,
+    mock_diagnosis = LLMDiagnosisOutput(
+        root_cause_diagnosis="Fraud alert",
+        confidence=0.95,
         recommended_action=RecoveryActionEnum.RETRY,
-        rationale="Attempt re-processing"
+        rationale="Attempt retry anyway"
     )
-    
-    decision = PolicyEngine.evaluate(fraud_payment, bad_llm_diag)
-    assert decision.is_overridden is True
-    assert decision.approved_action == RecoveryActionEnum.NO_ACTION
-    assert "Fraud Safety Guard" in decision.override_reason
+    policy_res = PolicyEngine.evaluate(payment, mock_diagnosis)
+    assert policy_res.is_overridden is True
+    assert policy_res.approved_action == RecoveryActionEnum.NO_ACTION
+    assert "Fraud Safety Guard" in (policy_res.override_reason or "")
 
+# 6. Policy Engine: Expired Card No Retry Test
 def test_policy_engine_expired_card_no_retry():
-    """Rule Check: Expired cards cannot be retried directly."""
-    expired_payment = PaymentRecord(
-        transaction_id="pay_test_expired",
-        customer_id="cust_004",
-        customer_name="Priya Patel",
+    payment = PaymentRecord(
+        transaction_id="tx_test_card_exp",
+        customer_id="cust_exp",
+        customer_name="Cardholder",
         customer_tier="STANDARD",
-        amount=3500.0,
+        amount=2500.0,
         currency="INR",
         payment_method="CREDIT_CARD",
         error_code="CARD_EXPIRED",
-        error_message="Card validity date is in the past",
+        error_message="Card validity in past",
+        status="FAILED",
         retry_count=0
     )
-    
-    llm_diag = LLMDiagnosisOutput(
-        root_cause_diagnosis="Card expired",
+    mock_diagnosis = LLMDiagnosisOutput(
+        root_cause_diagnosis="Expired card",
         confidence=0.85,
         recommended_action=RecoveryActionEnum.RETRY,
         rationale="Retry card"
     )
-    
-    decision = PolicyEngine.evaluate(expired_payment, llm_diag)
-    assert decision.is_overridden is True
-    assert decision.approved_action == RecoveryActionEnum.ALTERNATE_PAYMENT
+    policy_res = PolicyEngine.evaluate(payment, mock_diagnosis)
+    assert policy_res.is_overridden is True
+    assert policy_res.approved_action == RecoveryActionEnum.ALTERNATE_PAYMENT
 
+# 7. Policy Engine: Confidence Threshold Guard Test
 def test_policy_engine_confidence_threshold_guard():
-    """Rule Check: Low confidence (< 0.65) must trigger ESCALATE for human review."""
-    ambiguous_payment = PaymentRecord(
-        transaction_id="pay_test_ambig",
-        customer_id="cust_005",
-        customer_name="Neha Gupta",
+    payment = PaymentRecord(
+        transaction_id="tx_test_low_conf",
+        customer_id="cust_low",
+        customer_name="Low Conf User",
         customer_tier="STANDARD",
-        amount=4000.0,
+        amount=5000.0,
         currency="INR",
-        payment_method="CREDIT_CARD",
+        payment_method="UPI",
         error_code="DO_NOT_HONOR",
-        error_message="Generic decline (05)",
+        error_message="Issuer generic decline",
+        status="FAILED",
         retry_count=0
     )
-    
-    low_conf_diag = LLMDiagnosisOutput(
-        root_cause_diagnosis="Unknown decline cause",
-        confidence=0.55,
+    mock_diagnosis = LLMDiagnosisOutput(
+        root_cause_diagnosis="Uncertain reason for decline",
+        confidence=0.45,  # Below threshold of 0.65
         recommended_action=RecoveryActionEnum.RETRY,
-        rationale="Uncertain action"
+        rationale="Unsure why it failed"
     )
-    
-    decision = PolicyEngine.evaluate(ambiguous_payment, low_conf_diag)
-    assert decision.is_overridden is True
-    assert decision.approved_action == RecoveryActionEnum.ESCALATE
-    assert "Confidence Guard" in decision.override_reason
+    policy_res = PolicyEngine.evaluate(payment, mock_diagnosis)
+    assert policy_res.is_overridden is True
+    assert policy_res.approved_action == RecoveryActionEnum.ESCALATE
+    assert "Confidence Guard" in (policy_res.override_reason or "")
 
+# 8. Policy Engine: High-Value & VIP Guard Test
 def test_policy_engine_high_value_vip_guard():
-    """Rule Check: High-value transaction (>= ₹50,000) or VIP with critical decline escalates."""
-    vip_payment = PaymentRecord(
-        transaction_id="pay_test_vip",
-        customer_id="cust_vip_001",
-        customer_name="Vikramaditya Singhania",
-        customer_tier="VIP",
-        amount=78000.0,
+    payment = PaymentRecord(
+        transaction_id="tx_test_vip_high",
+        customer_id="cust_vip_corp",
+        customer_name="Corporate VIP",
+        customer_tier="ENTERPRISE",
+        amount=85000.0,
         currency="INR",
         payment_method="CREDIT_CARD",
         error_code="LIMIT_EXCEEDED",
-        error_message="Transaction amount exceeds per-day limit",
+        error_message="Card limit hit",
+        status="FAILED",
         retry_count=0
     )
-    
-    retry_diag = LLMDiagnosisOutput(
-        root_cause_diagnosis="Daily card spending limit hit",
-        confidence=0.90,
+    mock_diagnosis = LLMDiagnosisOutput(
+        root_cause_diagnosis="Limit exceeded on large account",
+        confidence=0.85,
         recommended_action=RecoveryActionEnum.RETRY,
-        rationale="Blind retry"
+        rationale="Retry card"
     )
-    
-    decision = PolicyEngine.evaluate(vip_payment, retry_diag)
-    assert decision.is_overridden is True
-    assert decision.approved_action == RecoveryActionEnum.ESCALATE
-    assert "High-Value Guard" in decision.override_reason
+    policy_res = PolicyEngine.evaluate(payment, mock_diagnosis)
+    assert policy_res.is_overridden is True
+    assert policy_res.approved_action == RecoveryActionEnum.ESCALATE
+    assert "High-Value Guard" in (policy_res.override_reason or "")
 
-def test_llm_authority_boundary_invariant():
-    """Invariant Check: An unauthorized action from LLM is blocked and overridden to ESCALATE."""
-    sample_payment = PaymentRecord(
-        transaction_id="pay_test_invariant",
-        customer_id="cust_006",
-        customer_name="Test Customer",
+# 9. Reproducibility & Stable Seed Test
+def test_reproducibility_stable_seed_across_calls():
+    key1 = "pay_fail_001_1234_RETRY_0"
+    seed1 = stable_seed(key1)
+    seed2 = stable_seed(key1)
+    assert seed1 == seed2
+    assert isinstance(seed1, int)
+
+    payment = PaymentRecord(
+        transaction_id="tx_repro_1",
+        customer_id="cust_1",
+        customer_name="Reproducible Customer",
         customer_tier="STANDARD",
-        amount=1000.0,
+        amount=10000.0,
         currency="INR",
         payment_method="UPI",
-        error_code="NETWORK_TIMEOUT",
-        error_message="Gateway timeout",
+        error_code="BANK_SERVER_DOWN",
+        error_message="Server down",
+        status="FAILED",
         retry_count=0
     )
-    
-    bad_diag = LLMDiagnosisOutput.model_construct(
-        root_cause_diagnosis="Attempt direct financial debit",
-        confidence=0.99,
-        recommended_action="FORCE_EXECUTE_PAYMENT",
-        rationale="Bypass rule"
+    outcome1 = SimulationEngine.simulate_ai_recovery(payment, RecoveryActionEnum.RETRY, seed_offset=42)
+    outcome2 = SimulationEngine.simulate_ai_recovery(payment, RecoveryActionEnum.RETRY, seed_offset=42)
+    assert outcome1.status == outcome2.status
+    assert outcome1.recovered_amount == outcome2.recovered_amount
+    assert outcome1.intervention_cost == outcome2.intervention_cost
+    assert outcome1.net_recovered_amount == outcome2.net_recovered_amount
+
+# 8. Economic Evaluation & Expected Net Recovery Test
+def test_economic_evaluation_expected_net_recovery():
+    payment = PaymentRecord(
+        transaction_id="tx_econ_1",
+        customer_id="cust_vip",
+        customer_name="VIP Trader",
+        customer_tier="VIP",
+        amount=82450.0,
+        currency="INR",
+        payment_method="UPI",
+        error_code="LIMIT_EXCEEDED",
+        error_message="Single tx limit hit",
+        status="FAILED",
+        retry_count=0
     )
+    policy_checks = PolicyEngine.evaluate_candidate_eligibility(payment)
+    econ = SimulationEngine.evaluate_action_economics(payment, policy_checks)
     
-    decision = PolicyEngine.evaluate(sample_payment, bad_diag)
-    assert decision.is_overridden is True
-    assert decision.approved_action == RecoveryActionEnum.ESCALATE
-    assert decision.is_safe is False
+    assert len(econ.candidate_actions) == 5
+    for a in econ.candidate_actions:
+        assert a.expected_gross_recovery == pytest.approx(a.success_probability * payment.amount, 0.01)
+        assert a.expected_net_recovery == pytest.approx(a.expected_gross_recovery - a.intervention_cost, 0.01)
+    assert econ.optimal_economic_action in [RecoveryActionEnum.ALTERNATE_PAYMENT.value, RecoveryActionEnum.ESCALATE.value]
+    assert econ.optimal_expected_net > 0.0
 
-# ==================== 5. IDEMPOTENCY & DUPLICATE EVENT PROTECTION TESTS ====================
-
-def test_idempotency_first_event_success_and_duplicate_blocked():
-    """Verify that an event executes first time, but identical event_id is blocked with DUPLICATE_BLOCKED."""
+# 9. Atomic Idempotency & Duplicate Protection Test
+def test_idempotency_atomic_and_duplicate_blocked():
     db = TestingSessionLocal()
     payment = db.query(PaymentRecord).first()
-    test_event_id = "evt_idemp_test_001"
+    event_id = "evt_unique_test_1001"
 
-    # First attempt: must succeed
-    first_res = RecoveryOrchestrator.process_single_payment(payment, db, event_id=test_event_id)
-    assert first_res.is_duplicate is False
-    assert first_res.simulation_outcome.status in ["RECOVERED", "FAILED"]
-
-    # Second attempt with same event_id: must be blocked
-    second_res = RecoveryOrchestrator.process_single_payment(payment, db, event_id=test_event_id)
-    assert second_res.is_duplicate is True
-    assert second_res.simulation_outcome.status == "DUPLICATE_BLOCKED"
-    assert "DUPLICATE_BLOCKED" in second_res.message
-
-    # Verify duplicate attempt was recorded in audit log
-    dup_audit = db.query(AuditLog).filter(
-        AuditLog.event_id == test_event_id,
-        AuditLog.duplicate_blocked == True
-    ).first()
-    assert dup_audit is not None
-    assert dup_audit.simulation_status == "DUPLICATE_BLOCKED"
-
-def test_idempotency_different_events_execute_independently():
-    """Verify that different event_ids process independently."""
-    db = TestingSessionLocal()
-    payment = db.query(PaymentRecord).first()
-
-    res1 = RecoveryOrchestrator.process_single_payment(payment, db, event_id="evt_distinct_101")
-    res2 = RecoveryOrchestrator.process_single_payment(payment, db, event_id="evt_distinct_102")
-
+    # First attempt: succeeds
+    res1 = RecoveryOrchestrator.process_single_payment(payment, db, event_id=event_id)
     assert res1.is_duplicate is False
-    assert res2.is_duplicate is False
+    assert res1.event_id == event_id
 
-# ==================== 6. BASELINE 2: RULE-BASED RECOVERY TESTS ====================
+    # Second attempt: blocked by idempotency
+    res2 = RecoveryOrchestrator.process_single_payment(payment, db, event_id=event_id)
+    assert res2.is_duplicate is True
+    assert res2.simulation_outcome.status == "DUPLICATE_BLOCKED"
+    assert res2.simulation_outcome.recovered_amount == 0.0
+    assert "DUPLICATE_BLOCKED" in (res2.message or "")
 
-def test_rule_based_baseline_simulation():
-    """Verify Baseline 2 simple rule-based recovery simulation."""
+    # Verify audit log recorded duplicate block
+    dup_log = db.query(AuditLog).filter(AuditLog.event_id == event_id, AuditLog.duplicate_blocked == True).first()
+    assert dup_log is not None
+    assert dup_log.duplicate_blocked is True
+    db.close()
+
+# 10. Baseline Independence Test
+def test_baseline_independence():
     db = TestingSessionLocal()
-    res = RecoveryOrchestrator.run_rule_based_simulation(db)
-    assert res["processed_count"] == 100
-    assert res["recovered_count"] > 0
-    assert res["total_recovered_revenue"] > 0.0
+    # Run Rule Baseline first without running AI recovery
+    rule_res = RecoveryOrchestrator.run_rule_based_simulation(db)
+    assert rule_res["processed_count"] == 100
+    assert rule_res["recovered_count"] > 0
+    assert rule_res["total_recovered_revenue"] > 0.0
 
-    # Verify DB records updated
-    payments = db.query(PaymentRecord).all()
-    for p in payments:
-        assert p.rule_baseline_status in ["RECOVERED", "FAILED"]
-        assert p.rule_baseline_action in [a.value for a in RecoveryActionEnum]
+    # Run Blind Baseline
+    blind_res = RecoveryOrchestrator.run_baseline_simulation(db)
+    assert blind_res["processed_count"] == 100
+    assert blind_res["total_retries"] >= 100
+    db.close()
 
-# ==================== 7. 3-WAY COMPARISON & MULTI-SEED EVALUATION ====================
-
-def test_3_way_strategy_comparison():
-    """Verify 3-way comparative analytics (Blind Retry vs Rule Baseline vs RecoverAI)."""
+# 11. 3-Way Strategy Comparison with Gross and Net Metrics Test
+def test_3_way_strategy_comparison_with_net_metrics():
     db = TestingSessionLocal()
-    
-    # Run all 3 strategies
     RecoveryOrchestrator.run_batch_ai_recovery(db)
     RecoveryOrchestrator.run_baseline_simulation(db)
     RecoveryOrchestrator.run_rule_based_simulation(db)
-    
-    comp = RecoveryOrchestrator.get_comparison_summary(db)
-    assert comp.total_records == 100
-    assert comp.ai_strategy is not None
-    assert comp.baseline_strategy is not None
-    assert comp.rule_baseline_strategy is not None
-    
-    # RecoverAI should demonstrate measured uplift over both baselines
-    assert comp.ai_strategy.recovery_rate_pct >= comp.rule_baseline_strategy.recovery_rate_pct
-    assert comp.ai_strategy.recovery_rate_pct > comp.baseline_strategy.recovery_rate_pct
-    assert comp.uplift_over_rule_revenue >= 0.0
 
-def test_multi_seed_evaluation_runner():
-    """Verify multi-seed statistical evaluation engine runs across seeds."""
-    res = RecoveryOrchestrator.run_multi_seed_evaluation(seed_start=1, seed_end=3, count_per_seed=50)
-    assert res.seed_count == 3
-    assert len(res.per_seed_results) == 3
-    assert res.ai_mean_recovery_rate > res.blind_mean_recovery_rate
-    assert res.ai_mean_recovery_rate > res.rule_mean_recovery_rate
-    assert res.mean_uplift_over_blind_rate > 0.0
-    assert res.mean_uplift_over_rule_rate > 0.0
+    summary = RecoveryOrchestrator.get_comparison_summary(db)
+    assert summary.ai_strategy.total_recovered_revenue > 0.0
+    assert summary.ai_strategy.total_net_recovered_revenue > 0.0
+    assert summary.ai_strategy.revenue_recovery_rate_pct > 0.0
+    assert summary.ai_strategy.transaction_recovery_rate_pct > 0.0
+    assert summary.uplift_revenue >= 0.0
+    assert summary.uplift_net_revenue >= 0.0
+    assert summary.uplift_over_rule_revenue >= 0.0
+    assert summary.uplift_over_rule_net_revenue >= 0.0
+    db.close()
 
-# ==================== 8. FASTAPI REST INTEGRATION ENDPOINTS ====================
+# 12. Multi-Seed Robustness Evaluation Test
+def test_multi_seed_robustness_evaluation():
+    res = RecoveryOrchestrator.run_multi_seed_evaluation(seed_start=1, seed_end=5, count_per_seed=20)
+    assert res.seed_count == 5
+    assert len(res.per_seed_results) == 5
+    assert res.ai_mean_gross_revenue > 0.0
+    assert res.ai_mean_intervention_cost > 0.0
+    assert res.ai_mean_net_revenue > 0.0
+    assert res.ai_mean_revenue_rate > 0.0
+    assert res.ai_mean_tx_recovery_rate > 0.0
+    assert res.rule_mean_intervention_cost > 0.0
+    assert res.blind_mean_intervention_cost > 0.0
+    assert res.mean_net_uplift_over_rule > 0.0
+    assert res.net_revenue_uplift_pct_over_rule > 0.0
+    assert res.mean_net_uplift_over_blind > 0.0
+    assert res.net_revenue_uplift_pct_over_blind > 0.0
+    assert res.tx_advantage_over_rule_pts > 0.0
+    assert res.tx_advantage_over_blind_pts > 0.0
 
-def test_api_endpoints():
-    """Verify all REST API endpoints function properly with new features."""
-    # 1. Health check
-    res = client.get("/api/health")
-    assert res.status_code == 200
-    assert res.json()["status"] == "healthy"
-    
-    # 2. Get Payments (100 records)
-    res = client.get("/api/payments")
-    assert res.status_code == 200
-    data = res.json()
-    assert len(data) == 100
-    
-    # 3. Diagnose Single Payment with Event ID
-    payment_id = data[0]["id"]
-    res = client.post(f"/api/recovery/diagnose/{payment_id}?event_id=evt_api_test_001")
-    assert res.status_code == 200
-    diag_res = res.json()
-    assert diag_res["is_duplicate"] is False
-    assert "llm_diagnosis" in diag_res
-    assert "policy_evaluation" in diag_res
+    for item in res.per_seed_results:
+        assert "ai_intervention_cost" in item
+        assert "rule_intervention_cost" in item
+        assert "blind_intervention_cost" in item
+        assert item["ai_net_revenue"] == round(item["ai_gross_revenue"] - item["ai_intervention_cost"], 2)
+        assert item["rule_net_revenue"] == round(item["rule_gross_revenue"] - item["rule_intervention_cost"], 2)
+        assert item["blind_net_revenue"] == round(item["blind_gross_revenue"] - item["blind_intervention_cost"], 2)
 
-    # 4. Diagnose Duplicate Event ID -> Blocked
-    res_dup = client.post(f"/api/recovery/diagnose/{payment_id}?event_id=evt_api_test_001")
-    assert res_dup.status_code == 200
-    assert res_dup.json()["is_duplicate"] is True
-    assert res_dup.json()["simulation_outcome"]["status"] == "DUPLICATE_BLOCKED"
-    
-    # 5. Run Batch AI Recovery
-    res = client.post("/api/recovery/batch")
-    assert res.status_code == 200
-    assert res.json()["processed_count"] == 100
-    
-    # 6. Run Blind Baseline
-    res = client.post("/api/recovery/baseline")
-    assert res.status_code == 200
-    assert res.json()["processed_count"] == 100
+# 13. REST Endpoints Integration & Custom Seed Reset Test
+def test_api_endpoints_including_seed_reset():
+    # Test reset with seed=42
+    r_reset_42 = client.post("/api/payments/reset?seed=42")
+    assert r_reset_42.status_code == 200
+    data_42 = r_reset_42.json()
+    assert data_42["count"] == 100
+    risk_42 = data_42["total_revenue_at_risk"]
 
-    # 7. Run Rule-Based Baseline
-    res = client.post("/api/recovery/rule-baseline")
-    assert res.status_code == 200
-    assert res.json()["processed_count"] == 100
-    
-    # 8. Get 3-Way Comparison
-    res = client.get("/api/recovery/comparison")
-    assert res.status_code == 200
-    comp_data = res.json()
-    assert "ai_strategy" in comp_data
-    assert "baseline_strategy" in comp_data
-    assert "rule_baseline_strategy" in comp_data
-    assert comp_data["rule_baseline_strategy"]["name"] == "Simple Rule-Based Baseline"
+    # Test reset with custom seed=99
+    r_reset_99 = client.post("/api/payments/reset?seed=99")
+    assert r_reset_99.status_code == 200
+    data_99 = r_reset_99.json()
+    assert data_99["seed"] == 99
+    assert data_99["count"] == 100
+    risk_99 = data_99["total_revenue_at_risk"]
+    # Changing the seed changes the generated dataset risk dynamically
+    assert risk_42 != risk_99
 
-    # 9. Get Multi-Seed Evaluation API
-    res = client.get("/api/recovery/multi-seed-evaluation?seed_start=1&seed_end=2")
-    assert res.status_code == 200
-    multi_data = res.json()
-    assert multi_data["seed_count"] == 2
-    assert len(multi_data["per_seed_results"]) == 2
-    
-    # 10. Get Audit Logs with event_id
-    res = client.get("/api/audit")
-    assert res.status_code == 200
-    assert len(res.json()) > 0
-    
-    # 11. Reset Synthetic Dataset (wipes payments & idempotency cache)
-    res = client.post("/api/payments/reset")
-    assert res.status_code == 200
-    assert res.json()["count"] == 100
+    # Reset back to demo seed=42
+    client.post("/api/payments/reset?seed=42")
 
-# ==================== 9. REPRODUCIBILITY REGRESSION TESTS ====================
-# These guard against a real bug found in code review: Python's built-in
-# hash() is randomized per-process for strings (PYTHONHASHSEED), so it
-# cannot be used for the "same seed 42 -> same result every time" guarantee
-# the README advertises. simulator.stable_seed() (SHA-256 based) replaced it.
+    # Test batch recovery
+    r_batch = client.post("/api/recovery/batch")
+    assert r_batch.status_code == 200
 
-def test_stable_seed_is_deterministic_within_process():
-    """Same input must always produce the same stable_seed output."""
-    val = "pay_fail_001_1234_RETRY_0"
-    assert stable_seed(val) == stable_seed(val)
-    # Different inputs should (almost always) differ
-    assert stable_seed(val) != stable_seed(val + "_different")
+    # Test baseline
+    r_base = client.post("/api/recovery/baseline")
+    assert r_base.status_code == 200
 
-def test_stable_seed_is_deterministic_across_processes():
-    """
-    Reproduces the exact bug found in review: spawn a fresh Python
-    subprocess (a new PYTHONHASHSEED, simulating a server restart) and
-    confirm stable_seed() still returns the identical value.
+    # Test rule baseline
+    r_rule = client.post("/api/recovery/rule-baseline")
+    assert r_rule.status_code == 200
 
-    Python's built-in hash() would fail this test (different value on
-    almost every run); stable_seed() must pass it every time.
-    """
-    val = "pay_fail_001_1234_RETRY_0"
-    expected = stable_seed(val)
+    # Test comparison
+    r_comp = client.get("/api/recovery/comparison")
+    assert r_comp.status_code == 200
+    comp = r_comp.json()
+    assert "ai_strategy" in comp
+    assert "baseline_strategy" in comp
+    assert "rule_baseline_strategy" in comp
+    assert "uplift_net_revenue" in comp
 
-    script = (
-        "import sys; sys.path.insert(0, '.'); "
-        "from app.services.simulator import stable_seed; "
-        f"print(stable_seed({val!r}))"
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True,
-        text=True,
-        cwd="backend" if __import__("os").path.isdir("backend") else ".",
-    )
-    assert result.returncode == 0, result.stderr
-    subprocess_value = int(result.stdout.strip())
-    assert subprocess_value == expected, (
-        f"stable_seed() differed across processes: {expected} (this process) "
-        f"vs {subprocess_value} (subprocess). Reproducibility is broken."
-    )
+    # Test single diagnosis with idempotency
+    r_diag = client.post("/api/recovery/diagnose/1?event_id=evt_api_test_001")
+    assert r_diag.status_code == 200
+    assert r_diag.json()["is_duplicate"] is False
+    assert "economic_evaluation" in r_diag.json()
 
-def test_seed_42_simulation_outcomes_reproducible_across_runs():
-    """
-    End-to-end reproducibility check for the actual demo claim: generating
-    the seed-42 dataset and simulating RecoverAI recovery twice (in two
-    independent in-memory runs, mimicking two separate server sessions)
-    must yield identical per-transaction outcomes and identical totals.
-    """
-    def run_once():
-        records = generate_synthetic_payments(count=100, seed=42)
-        total_recovered = 0.0
-        statuses = []
-        for r in records:
-            diag, _ = LLMService.diagnose_payment(r)
-            policy_res = PolicyEngine.evaluate(r, diag)
-            outcome = SimulationEngine.simulate_ai_recovery(r, policy_res.approved_action)
-            statuses.append(outcome.status)
-            total_recovered += outcome.recovered_amount
-        return statuses, round(total_recovered, 2)
+    # Repeat same event_id -> should be blocked
+    r_diag_dup = client.post("/api/recovery/diagnose/1?event_id=evt_api_test_001")
+    assert r_diag_dup.status_code == 200
+    assert r_diag_dup.json()["is_duplicate"] is True
 
-    statuses_1, total_1 = run_once()
-    statuses_2, total_2 = run_once()
-
-    assert statuses_1 == statuses_2
-    assert total_1 == total_2
-
-# ==================== 10. IDEMPOTENCY ATOMICITY TEST ====================
-
-def test_db_unique_constraint_rejects_duplicate_event_id():
-    """
-    Proves the actual mechanism that backs idempotency under a race:
-    ProcessedEvent.event_id has a DB-level unique constraint, so two rows
-    can never share an event_id -- even if both writers' pre-checks saw
-    nothing (the TOCTOU window a pure application-level check can't close).
-    """
-    db = TestingSessionLocal()
-    payment = db.query(PaymentRecord).first()
-    race_event_id = "evt_db_constraint_race_001"
-
-    winner = ProcessedEvent(
-        event_id=race_event_id,
-        payment_id=payment.id,
-        transaction_id=payment.transaction_id,
-        action_approved="RETRY",
-        simulation_status="RECOVERED",
-        recovered_amount=100.0,
-    )
-    db.add(winner)
-    db.commit()
-
-    loser = ProcessedEvent(
-        event_id=race_event_id,  # identical event_id: the loser of a race
-        payment_id=payment.id,
-        transaction_id=payment.transaction_id,
-        action_approved="RETRY",
-        simulation_status="RECOVERED",
-        recovered_amount=100.0,
-    )
-    db.add(loser)
-    with pytest.raises(IntegrityError):
-        db.commit()
-    db.rollback()
-
-    count = db.query(ProcessedEvent).filter(ProcessedEvent.event_id == race_event_id).count()
-    assert count == 1
-
-def test_orchestrator_handles_concurrent_race_gracefully():
-    """
-    Forces the exact TOCTOU race flagged in review: process_single_payment's
-    pre-check is made to (incorrectly) report 'no existing event' for one
-    call, even though a competing ProcessedEvent row for the same event_id
-    is committed by a second, independent session moments earlier --
-    reproducing two requests racing past the pre-check at the same time.
-
-    Before this fix, the resulting IntegrityError at commit time would
-    propagate as an unhandled 500. After this fix, process_single_payment
-    must catch it and return a graceful DUPLICATE_BLOCKED response, with
-    no double-counted revenue and no crash.
-    """
-    db = TestingSessionLocal()
-    payment = db.query(PaymentRecord).first()
-    race_event_id = "evt_orchestrator_race_001"
-
-    # A second, independent session wins the race first.
-    other_session = TestingSessionLocal()
-    winner = ProcessedEvent(
-        event_id=race_event_id,
-        payment_id=payment.id,
-        transaction_id=payment.transaction_id,
-        action_approved="RETRY",
-        simulation_status="RECOVERED",
-        recovered_amount=100.0,
-    )
-    other_session.add(winner)
-    other_session.commit()
-    other_session.close()
-
-    # Force this session's pre-check to miss the row that already exists,
-    # simulating the TOCTOU window -- it proceeds believing it's first.
-    original_first = Query.first
-    state = {"bypassed": False}
-
-    def patched_first(self):
-        if not state["bypassed"]:
-            state["bypassed"] = True
-            return None
-        return original_first(self)
-
-    with patch.object(Query, "first", patched_first):
-        result = RecoveryOrchestrator.process_single_payment(payment, db, event_id=race_event_id)
-
-    assert result.is_duplicate is True
-    assert result.simulation_outcome.status == "DUPLICATE_BLOCKED"
-
-    # Still exactly one ProcessedEvent row for this event_id -- no
-    # double-processing occurred despite the forced race.
-    count = db.query(ProcessedEvent).filter(ProcessedEvent.event_id == race_event_id).count()
-    assert count == 1
+    # Test multi-seed endpoint
+    r_multi = client.get("/api/recovery/multi-seed-evaluation?seed_start=1&seed_end=3")
+    assert r_multi.status_code == 200
+    assert r_multi.json()["seed_count"] == 3

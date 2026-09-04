@@ -11,7 +11,7 @@ flowchart TD
     subgraph Frontend_Layer ["Frontend Layer (React 18 + Vite + Tailwind CSS)"]
         UI_KPI["Executive KPI Dashboard"]
         UI_Comp["3-Way Comparative Analytics (Blind vs Rule vs RecoverAI)"]
-        UI_Seed["20-Seed Statistical Validation View"]
+        UI_Seed["20-Seed Robustness Evaluation View"]
         UI_Grid["100-Record Transaction Grid"]
         UI_Modal["Live 4-Stage Recovery Pipeline Modal (AI vs Policy Boundary)"]
         UI_Audit["Decision & Guardrail Audit Trail (with Duplicate Tracking)"]
@@ -70,7 +70,7 @@ LLM Diagnostic Service              Deterministic Policy Engine               Ou
 
 ┌───────────────────────┐            ┌───────────────────────┐            ┌───────────────────────┐
 │ • Root-Cause Analysis │            │ • Whitelist Validation│            │ • Simulated Recovery  │
-│ • Confidence Score    │ ─────────> │ • Safety Guardrails   │ ─────────> │ • Revenue Calculation │
+│ • Confidence Score    │ ─────────> │ • Safety Guardrails   │ ─────────> │ • Net Revenue Calculation │
 │ • Recommended Action  │            │ • Explicit Overrides  │            │ • Immutable Audit Log │
 └───────────────────────┘            └───────────────────────┘            └───────────────────────┘
   *Zero financial state                *Sole authorization                   *Synthetic outcomes
@@ -98,17 +98,27 @@ LLM Diagnostic Service              Deterministic Policy Engine               Ou
 
 ## 4. 3-Way Comparative Evaluation Framework
 
-To honestly measure the value of AI, RecoverAI implements a 3-way evaluation framework:
+To objectively quantify recovery performance and economic viability, RecoverAI implements a comprehensive 3-way evaluation framework:
+
+> [!NOTE]
+> **Synthetic Domain Assumptions Disclaimer**: All strategies are evaluated against a documented synthetic outcome model ([`simulator.py`](backend/app/services/simulator.py)). Outcomes, probabilities, and financial figures reflect controlled simulation performance, **not empirical live gateway data or real-world statistical significance**. The 20-seed robustness evaluation tests whether the comparative advantage holds across 20 distinct pseudo-random transaction mixes (2,000 transactions).
 
 1. **Baseline 1: Naive Blind Retry**:
-   - Strategy: Blind immediate 3x retries on all failures without root-cause diagnosis.
-   - Evaluation: Achieves ~21% recovery but causes high customer fatigue and wasted retry fees.
+   - **Strategy**: Blind immediate 3x retries on all payment failures without root-cause diagnosis or safety filters.
+   - **20-Seed Performance**: Mean Gross ₹7.05L | Mean Cost ₹5,387 | **Mean Net ₹7.00L** | Mean Rev Rate 18.90% | **Mean Tx Rate 20.75%** (±4.58%).
+   - **Outcome**: Low recovery, heavy customer fatigue (228 wasted failures in Seed 42), and wasted intervention costs.
+
 2. **Baseline 2: Simple Rule-Based Recovery**:
-   - Strategy: Static deterministic mapping of error codes to recovery channels.
-   - Evaluation: Achieves ~61.5% recovery, but cannot adapt to customer tiers, payment amounts, prior retry fatigue, or ambiguous declines.
+   - **Strategy**: Static deterministic mapping of error codes to recovery channels without customer tier, value, or channel context.
+   - **20-Seed Performance**: Mean Gross ₹18.48L | Mean Cost ₹1,202 | **Mean Net ₹18.47L** | Mean Rev Rate 49.91% | **Mean Tx Rate 63.05%** (±4.37%).
+   - **Outcome**: Improved over blind retries, but incapable of nuanced multi-variable reasoning for VIP accounts or ambiguous declines.
+
 3. **RecoverAI (AI Contextual Diagnosis + Deterministic Policy Engine)**:
-   - Strategy: LLM contextual root-cause reasoning combined with strict deterministic policy guardrails.
-   - Evaluation: Achieves **85.8%** mean recovery (+24.25% uplift over simple rules, +64.85% uplift over blind retries).
+   - **Strategy**: LLM contextual root-cause reasoning combined with strict deterministic policy guardrails and economic optimization.
+   - **20-Seed Performance**: Mean Gross ₹25.53L | Mean Cost ₹2,111 | **Mean Net ₹25.51L** (±₹2.62L) | Mean Rev Rate 68.62% | **Mean Tx Rate 82.15%** (±4.22%, range 74.0% – 89.0%).
+   - **Comparative Advantage**:
+     - **vs Simple Rule**: **+₹703,461.20 (+38.08% net revenue uplift)**, **+19.10 percentage points** transaction recovery advantage.
+     - **vs Blind Retry**: **+₹1,851,006.58 (+264.55% net revenue uplift)**, **+61.40 percentage points** transaction recovery advantage.
 
 ---
 
@@ -128,7 +138,7 @@ recoverai/
 │   │   │   ├── risk_engine.py     # Revenue at risk & feasibility assessment
 │   │   │   ├── llm_service.py     # LLM diagnostic service + deterministic fallback
 │   │   │   ├── policy_engine.py   # FINAL AUTHORITY deterministic guardrails
-│   │   │   ├── simulator.py       # 3-way strategy simulation engine
+│   │   │   ├── simulator.py       # 3-way strategy simulation engine & cost model
 │   │   │   └── orchestrator.py    # Pipeline coordinator & multi-seed evaluation
 │   │   └── routers/
 │   │       ├── payments.py        # /api/payments endpoints (with idempotency reset)
@@ -136,7 +146,7 @@ recoverai/
 │   │       ├── audit.py           # /api/audit endpoints (with duplicate tracking)
 │   │       └── analytics.py       # /api/analytics endpoints
 │   ├── scripts/
-│   │   └── evaluate_seeds.py      # 20-seed statistical evaluation CLI script
+│   │   └── evaluate_seeds.py      # 20-seed robustness evaluation CLI script
 │   ├── tests/
 │   │   └── test_core.py           # 15 automated unit & integration tests
 │   ├── .env.example
@@ -146,7 +156,7 @@ recoverai/
 │   │   ├── components/
 │   │   │   ├── Header.jsx         # Status badge, 3 baseline trigger buttons
 │   │   │   ├── KpiCards.jsx       # 5 financial KPI cards & simulation disclaimer
-│   │   │   ├── ComparisonView.jsx # 3-way strategy comparison & 20-seed validation drawer
+│   │   │   ├── ComparisonView.jsx # 3-way strategy comparison & 20-seed robustness drawer
 │   │   │   ├── TransactionTable.jsx # 100-record grid with search/filters
 │   │   │   ├── RecoveryModal.jsx  # Live 4-stage pipeline modal (AI vs Policy boundary)
 │   │   │   ├── AuditTrail.jsx     # Filterable override & duplicate audit log

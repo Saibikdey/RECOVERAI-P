@@ -229,7 +229,7 @@ The dashboard header displays a live badge indicating whether the current run us
    - Click **"2. Rule Baseline"** to simulate static rule-based recovery.
    - Click **"3. Run RecoverAI"** to execute AI diagnosis with policy engine authorization.
 4. **Compare 3 Strategies**: Observe the side-by-side comparison of gross recovery, intervention cost, net recovery, and recovery rates.
-5. **View 20-Seed Analysis**: Expand the **"20-Seed Robustness Evaluation"** drawer to view consistency across 2,000 simulated transactions under the documented synthetic probability model.
+5. **View 20-Seed Robustness Evaluation**: Expand the **"20-Seed Robustness Evaluation"** drawer to view consistency across 2,000 simulated transactions under the documented synthetic probability model.
 6. **Inspect Single Payment & Idempotency**:
    - Navigate to the **"Transactions"** tab and click **"Diagnose"** on any transaction to view the 4-stage pipeline stepper (**"AI RECOMMENDS. POLICY ENGINE DECIDES."**).
 7. **Inspect Audit Trail**: Switch to the **"Audit Trail"** tab to filter by **"Overrides Only"** or **"Duplicates Blocked"**.
